@@ -2,7 +2,7 @@
 
 The Go SDK for the [Agent Wire Protocol](https://agentwireprotocol.com) (AWP), the peer-to-peer messaging protocol for coding agents. A `Peer` listens and connects, sends messages in threads, and delivers what arrives as typed events.
 
-It is built on the engine of the [reference implementation](https://github.com/agentwireprotocol/awp), so a `Peer` behaves exactly like the `awp` daemon: resume with an outbox on disk (SQLite), acks, dedup by id, blobs in chunks, grants and introductions, ping/pong, reconnection with backoff, and tailcat as the transport that reaches anywhere.
+It is built on the engine of the [reference implementation](https://github.com/agentwireprotocol/awp), so a `Peer` behaves exactly like the `awp` daemon: resume with an outbox on disk (SQLite), acks, dedup by id, blobs in chunks, grants and introductions, ping/pong and reconnection with backoff, all inside a WireGuard tunnel between the two peers' keys, carried by tailcat, UDP, WebSockets or a Unix socket.
 
 ```sh
 go get github.com/agentwireprotocol/go-sdk
@@ -25,7 +25,7 @@ func main() {
 	p, err := awp.New(awp.Options{
 		Dir:    "/var/lib/mybot",          // identity, outbox, threads, blobs
 		Name:   "mybot@builder",
-		Listen: []string{"tailcat"},       // or "tcp:127.0.0.1:7000", "unix:/tmp/awp.sock"
+		Listen: []string{"tailcat"},       // or "udp:0.0.0.0:41641", "cloudflare", "unix:/tmp/awp.sock"
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -33,7 +33,9 @@ func main() {
 	defer p.Close()
 
 	ctx := context.Background()
-	key, err := p.Connect(ctx, "tc...") // an address shared out of band
+	mine, _ := p.WaitAddress(ctx)       // awp1...: give it to the other agent
+	fmt.Println("my address:", mine)
+	key, err := p.Connect(ctx, "awp1...") // an address shared out of band
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -56,6 +58,7 @@ func main() {
 ## What a Peer does
 
 - **`New`** opens the state directory (or a temporary one), loads or creates the Ed25519 identity, and starts listening on `Options.Listen` and reconnecting to peers with unfinished business.
+- **`Address`** is the one string to share: key, admission secret, and every carrier endpoint. **`WaitAddress`** waits for tailcat or cloudflare to come up; **`RotatePSK`** replaces the admission secret, shutting out strangers holding old copies but not peers already met.
 - **`Connect`** dials an address and returns the peer's key once the handshake is done. The engine keeps the connection and reconnects with exponential backoff, capped at a minute, for as long as there are unacked messages or open threads. Sleeping sandboxes wake on connect.
 - **`Send`** queues a message. It never fails because the peer is away: the message is on disk and goes out on the next resume. **`Delivered`** waits for the peer's ack. Files in `Draft.Files` travel as blobs in 256 KiB chunks, ahead of the message.
 - **`SetState`** sets this side's state on a thread (`working`, `waiting`, `done`, `failed`, `closed`, or any word the two agents agree on).
@@ -68,17 +71,25 @@ func main() {
 
 `Peer.Node()` exposes the engine for what this package does not cover, such as presence and conversation sharing. Its API follows the reference implementation's releases, not this module's.
 
-## Transports
+## Carriers
 
-`tailcat` is embedded: a `Peer` that lists it in `Listen` gets a WireGuard tunnel with an address any peer can reach, through NAT, with no account. `tcp:` and `unix:` are for private networks, local use and tests; plain TCP to a public address is refused unless `AllowPlaintext` is set.
+Every connection is WireGuard between the two peers' identity keys; the carriers only move its packets, so none of them is trusted. `Options.Listen` picks them, and all go into the one address:
+
+| carrier | for |
+|---|---|
+| `tailcat` | reachable from anywhere, through NAT, no account; embedded |
+| `udp:HOST:PORT` | a LAN, Fly's 6PN, a public address |
+| `ws:HOST:PORT`, `ws:HOST:PORT=URL` | networks that block UDP; behind a proxy or HTTP tunnel |
+| `cloudflare` | a WebSocket through a Cloudflare quick tunnel (needs `cloudflared`) |
+| `unix:/path` | peers on one machine, tests |
 
 ## Conformance
 
-`go test ./...` runs the protocol's conformance suite ([`awp conform`](https://docs.agentwireprotocol.com/reference/conformance)) against a `Peer` in-process, along with a two-peer conversation, queued delivery across a restart and blob transfer. Every line a `Peer` sends validates against the [JSON Schema](https://agentwireprotocol.com/schema/v0/awp.schema.json).
+`go test ./...` runs the protocol's conformance suite ([`awp conform`](https://docs.agentwireprotocol.com/reference/conformance)) against a `Peer` in-process, along with a two-peer conversation, queued delivery across a restart and blob transfer. Every line a `Peer` sends validates against the [JSON Schema](https://agentwireprotocol.com/schema/v1/awp.schema.json).
 
 ## Status
 
-v0. The API may change before v1; the wire protocol is v0 and stable.
+v0. The API may change before v1. It speaks protocol v1 (SPEC.md draft 2).
 
 ## License
 

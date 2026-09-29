@@ -4,10 +4,11 @@
 // implementation (github.com/agentwireprotocol/awp), so a Peer behaves
 // exactly like the awp daemon: resume with an outbox on disk, acks, dedup
 // by id, blobs in chunks, grants and introductions, ping/pong, and
-// reconnection with backoff.
+// reconnection with backoff, all inside a WireGuard tunnel between the two
+// peers' keys.
 //
 //	p, err := awp.New(awp.Options{Dir: "/var/lib/mybot", Name: "mybot@host", Listen: []string{"tailcat"}})
-//	key, err := p.Connect(ctx, "tc...")
+//	key, err := p.Connect(ctx, "awp1...")
 //	sent, err := p.Send(awp.Draft{To: key, Subject: "Run the suite", Text: "Please run make test."})
 //	for ev := range p.Events(ctx) {
 //		if m, ok := ev.(awp.Message); ok { ... }
@@ -42,15 +43,21 @@ type Options struct {
 	Name  string
 	About string
 
-	// Listen lists the addresses to accept connections on: "tailcat" (a
-	// WireGuard tunnel with an address peers can reach from anywhere),
-	// "tcp:host:port" or "unix:/path". A Peer that only connects out may
-	// leave it empty.
+	// Listen lists the carriers to accept connections on. Every one ends
+	// up in the Peer's one address:
+	//
+	//	tailcat              reachable from anywhere, through NAT, no account
+	//	udp:HOST:PORT        plain UDP: a LAN, Fly's 6PN, a public address
+	//	ws:HOST:PORT[=URL]   WebSockets, or behind a proxy or tunnel at URL
+	//	cloudflare           WebSockets through a Cloudflare quick tunnel (needs cloudflared)
+	//	unix:/path           peers on the same machine
+	//
+	// A Peer that only connects out may leave it empty.
 	Listen []string
 
-	// Advertise is the address sent in hello so peers can reconnect to
-	// this Peer. Empty means the tailcat address if there is one, else the
-	// first listen address; "none" sends nothing.
+	// Advertise controls the address sent in hello so peers can reconnect
+	// to this Peer: empty sends this Peer's address without its
+	// pre-shared key, "none" sends nothing.
 	Advertise string
 
 	// Policy is the admission and capability policy: who may connect,
@@ -63,16 +70,16 @@ type Options struct {
 	// PingInterval is the idle time before a ping; default 30 s. Two
 	// missed pongs mean a dead connection.
 	PingInterval time.Duration
-	// HandshakeTimeout bounds hello and auth; default 30 s.
+	// HandshakeTimeout bounds the hello exchange; default 30 s.
 	HandshakeTimeout time.Duration
 	// MaxBackoff caps the reconnect backoff; default 60 s.
 	MaxBackoff time.Duration
 	// OutboxTTL is how long unacked messages are kept; default 7 days.
 	OutboxTTL time.Duration
 
-	// AllowPlaintext permits plain TCP to public addresses, which the spec
-	// advises against: TCP has no encryption of its own.
-	AllowPlaintext bool
+	// Cloudflared is the cloudflared binary for the cloudflare carrier;
+	// default "cloudflared" on PATH.
+	Cloudflared string
 	// Presence publishes a signed summary of this Peer's threads and peers
 	// to the network (the presence extension), so dashboards can show it.
 	Presence bool
@@ -141,7 +148,7 @@ func New(o Options) (*Peer, error) {
 		HandshakeTimeout: o.HandshakeTimeout,
 		MaxBackoff:       o.MaxBackoff,
 		OutboxTTL:        o.OutboxTTL,
-		AllowPlaintext:   o.AllowPlaintext,
+		Cloudflared:      o.Cloudflared,
 		Presence:         o.Presence,
 		Logf:             o.Logf,
 		Trace:            o.Trace,
@@ -182,14 +189,54 @@ func (p *Peer) Name() string { return p.n.Name() }
 // Dir is the state directory.
 func (p *Peer) Dir() string { return p.n.Home() }
 
-// Addresses lists the addresses this Peer listens on, the tailcat one
-// first. A tailcat listener takes a few seconds to come up; until then it
-// is missing from the list (see TailcatAddress).
-func (p *Peer) Addresses() []string { return p.n.Addresses() }
+// Address is the address to share (awp1...): this Peer's key, the
+// pre-shared key that admits peers it has not met, and every endpoint it
+// listens on. It is "" until a carrier is up; tailcat and cloudflare take
+// a few seconds (see WaitAddress).
+func (p *Peer) Address() string {
+	a := p.n.Address()
+	if len(a.Endpoints) == 0 {
+		return ""
+	}
+	return a.String()
+}
 
-// TailcatAddress is the bare tailcat address, or "" and why not (the
-// listener is still starting, or failed).
-func (p *Peer) TailcatAddress() (addr, status string) { return p.n.TailcatAddress() }
+// Endpoints lists the carrier endpoints in the address, as "kind:value".
+func (p *Peer) Endpoints() []string {
+	var out []string
+	for _, e := range p.n.Address().Endpoints {
+		out = append(out, e.String())
+	}
+	return out
+}
+
+// Pending lists the carriers still coming up, with their last error if
+// any.
+func (p *Peer) Pending() map[string]string { return p.n.Pending() }
+
+// WaitAddress waits until every carrier in Options.Listen is up, or ctx
+// ends, and returns the address. If some carriers failed while others are
+// up it returns the address with what is up, and an error naming the rest.
+func (p *Peer) WaitAddress(ctx context.Context) (string, error) {
+	for {
+		ch := p.n.Changed()
+		pending := p.Pending()
+		if len(pending) == 0 {
+			return p.Address(), nil
+		}
+		select {
+		case <-ch:
+		case <-time.After(250 * time.Millisecond):
+		case <-ctx.Done():
+			return p.Address(), fmt.Errorf("carriers not up: %v", pending)
+		}
+	}
+}
+
+// RotatePSK replaces the pre-shared key in this Peer's address. Every copy
+// of the address shared before stops admitting peers not met yet; peers
+// already met keep working.
+func (p *Peer) RotatePSK() error { return p.n.RotatePSK() }
 
 // Node is the engine underneath, for what this package does not expose.
 // Its API follows the reference implementation, not this SDK's versioning.

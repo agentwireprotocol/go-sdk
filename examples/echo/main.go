@@ -19,7 +19,7 @@ import (
 
 func main() {
 	dir := flag.String("dir", "", "state directory (default: a temporary one, new identity each run)")
-	listen := flag.String("listen", "tailcat", "address to listen on: tailcat, tcp:host:port or unix:/path")
+	listen := flag.String("listen", "tailcat", "carrier to listen on: tailcat, udp:HOST:PORT, ws:HOST:PORT, cloudflare or unix:/path")
 	flag.Parse()
 
 	p, err := awp.New(awp.Options{Dir: *dir, Name: "echo", Listen: []string{*listen}, Logf: log.Printf})
@@ -32,9 +32,11 @@ func main() {
 	defer stop()
 
 	fmt.Println("key:", p.Key())
-	if *listen == "tailcat" {
-		fmt.Println("waiting for the tailcat address...")
+	addr, err := p.WaitAddress(ctx)
+	if err != nil {
+		log.Fatal(err)
 	}
+	fmt.Println("address:", addr)
 	for ev := range p.Events(ctx) {
 		switch e := ev.(type) {
 		case awp.Connected:
