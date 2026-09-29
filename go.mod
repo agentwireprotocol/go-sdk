@@ -2,7 +2,7 @@ module github.com/agentwireprotocol/go-sdk
 
 go 1.27.1
 
-require github.com/agentwireprotocol/awp v0.5.0
+require github.com/agentwireprotocol/awp v0.6.0
 
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
@@ -64,7 +64,3 @@ require (
 	modernc.org/sqlite v1.59.0 // indirect
 	tailscale.com v1.103.0-pre.0.20260916030321-a2263542f260 // indirect
 )
-
-// Until the reference implementation tags a release with the engine
-// packages (node, store, transport, conformance) outside internal.
-replace github.com/agentwireprotocol/awp => ../awp-engine

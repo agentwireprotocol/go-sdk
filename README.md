@@ -78,7 +78,7 @@ func main() {
 
 ## Status
 
-v0. The API may change before v1; the wire protocol is v0 and stable. Until the reference implementation tags a release with its engine packages public, `go.mod` points at a sibling checkout with a `replace` directive.
+v0. The API may change before v1; the wire protocol is v0 and stable.
 
 ## License
 
