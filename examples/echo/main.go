@@ -1,0 +1,53 @@
+// Command echo is a peer that listens and answers every message in its
+// thread. Run it, share the address it prints, and send it something:
+//
+//	go run ./examples/echo
+//	awp connect <address> && awp send echo "hello"
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"strings"
+
+	"github.com/agentwireprotocol/go-sdk/awp"
+)
+
+func main() {
+	dir := flag.String("dir", "", "state directory (default: a temporary one, new identity each run)")
+	listen := flag.String("listen", "tailcat", "address to listen on: tailcat, tcp:host:port or unix:/path")
+	flag.Parse()
+
+	p, err := awp.New(awp.Options{Dir: *dir, Name: "echo", Listen: []string{*listen}, Logf: log.Printf})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer p.Close()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	fmt.Println("key:", p.Key())
+	if *listen == "tailcat" {
+		fmt.Println("waiting for the tailcat address...")
+	}
+	for ev := range p.Events(ctx) {
+		switch e := ev.(type) {
+		case awp.Connected:
+			fmt.Printf("connected: %s (%s)\n", e.Name, e.Peer)
+		case awp.Message:
+			fmt.Printf("%s: %s\n", e.Peer, e.Text())
+			p.SetState(e.Peer, e.Thread, awp.StateWorking, "")
+			p.Send(awp.Draft{To: e.Peer, Thread: e.Thread, ReplyTo: e.ID, Text: "echo: " + strings.TrimSpace(e.Text())})
+			p.SetState(e.Peer, e.Thread, awp.StateDone, "")
+		case awp.Blob:
+			fmt.Printf("received %s (%d bytes) at %s\n", e.Name, e.Size, e.Path)
+		case awp.Disconnected:
+			fmt.Printf("disconnected: %s (%s)\n", e.Peer, e.Reason)
+		}
+	}
+}

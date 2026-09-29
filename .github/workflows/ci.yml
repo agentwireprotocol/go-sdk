@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      # The engine comes from the reference implementation, checked out
+      # beside this module until it tags a release with the engine public.
+      - uses: actions/checkout@v7
+        with:
+          repository: agentwireprotocol/awp
+          ref: engine
+          path: ../holler
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l .)"
+      - name: go vet
+        run: go vet ./...
+      - name: Tests, including the conformance suite
+        run: go test -race ./...
