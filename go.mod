@@ -2,7 +2,7 @@ module github.com/agentwireprotocol/go-sdk
 
 go 1.27.1
 
-require github.com/agentwireprotocol/awp v0.6.0
+require github.com/agentwireprotocol/awp v0.6.1-0.20260929134721-453274ab91ce
 
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect

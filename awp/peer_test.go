@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,13 +13,28 @@ import (
 	"github.com/agentwireprotocol/go-sdk/awp"
 )
 
-func newPeer(t *testing.T, name string) *awp.Peer {
+// shortTemp is a temporary directory with a short path: Unix socket paths
+// are limited to about 100 bytes.
+func shortTemp(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
+	d, err := os.MkdirTemp("", "awps")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(d) })
+	return d
+}
+
+func newPeer(t *testing.T, name string, listen ...string) *awp.Peer {
+	t.Helper()
+	dir := shortTemp(t)
+	if len(listen) == 0 {
+		listen = []string{"unix:" + filepath.Join(dir, "s")}
+	}
 	p, err := awp.New(awp.Options{
 		Dir:          dir,
 		Name:         name,
-		Listen:       []string{"unix:" + filepath.Join(dir, "s")},
+		Listen:       listen,
 		PingInterval: 2 * time.Second,
 		MaxBackoff:   500 * time.Millisecond,
 		Logf:         func(f string, a ...any) { t.Logf("["+name+"] "+f, a...) },
@@ -56,7 +72,7 @@ func TestConversation(t *testing.T) {
 	a, b := newPeer(t, "a@test"), newPeer(t, "b@test")
 	aEvents, bEvents := a.Events(ctx), b.Events(ctx)
 
-	key, err := a.Connect(ctx, b.Addresses()[0])
+	key, err := a.Connect(ctx, b.Address())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +202,7 @@ func TestQueuedWhileAway(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	a := newPeer(t, "a@test")
-	bDir := t.TempDir()
+	bDir := shortTemp(t)
 	open := func() *awp.Peer {
 		p, err := awp.New(awp.Options{Dir: bDir, Name: "b@test", Listen: []string{"unix:" + filepath.Join(bDir, "s")}, PingInterval: 2 * time.Second})
 		if err != nil {
@@ -196,7 +212,7 @@ func TestQueuedWhileAway(t *testing.T) {
 	}
 	b := open()
 	aEvents := a.Events(ctx)
-	bKey, err := a.Connect(ctx, b.Addresses()[0])
+	bKey, err := a.Connect(ctx, b.Address())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +245,7 @@ func TestConformance(t *testing.T) {
 	p := newPeer(t, "sdk@test")
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	rep, err := conformance.Run(ctx, conformance.Options{Addr: p.Addresses()[0], Timeout: 10 * time.Second})
+	rep, err := conformance.Run(ctx, conformance.Options{Addr: p.Address(), Timeout: 10 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,11 +268,80 @@ func TestEphemeral(t *testing.T) {
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatal(err)
 	}
-	if p.Key() == "" || len(p.Addresses()) != 0 {
-		t.Fatalf("key %q addresses %v", p.Key(), p.Addresses())
+	if p.Key() == "" || p.Address() != "" || len(p.Endpoints()) != 0 {
+		t.Fatalf("key %q address %q", p.Key(), p.Address())
 	}
 	p.Close()
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("temporary dir %s still exists", dir)
+	}
+}
+
+// TestConformanceListening: the runner listens and the Peer dials it; the
+// scenarios that share one connection run on it.
+func TestConformanceListening(t *testing.T) {
+	p := newPeer(t, "sdk@test")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	addr := make(chan string, 1)
+	go func() {
+		if _, err := p.Connect(ctx, <-addr); err != nil {
+			t.Logf("connect: %v", err)
+		}
+	}()
+	rep, err := conformance.Run(ctx, conformance.Options{Listen: "udp:127.0.0.1:0", Timeout: 10 * time.Second, Logf: func(f string, a ...any) {
+		if strings.HasPrefix(f, "listening at") {
+			addr <- a[0].(string)
+		}
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Failed != 0 || rep.Passed == 0 {
+		for _, r := range rep.Results {
+			t.Logf("%s: %s %s", r.Name, r.Status, r.Reason)
+		}
+		t.Fatalf("%d passed, %d failed", rep.Passed, rep.Failed)
+	}
+}
+
+// TestCarriersAndRotation: a Peer on udp and ws has one address with both;
+// rotating its pre-shared key shuts out strangers holding the old address,
+// not peers already met.
+func TestCarriersAndRotation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	b := newPeer(t, "b@test", "udp:127.0.0.1:0", "ws:127.0.0.1:0")
+	addr, err := b.WaitAddress(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eps := b.Endpoints(); len(eps) != 2 || !strings.HasPrefix(eps[0], "udp:") || !strings.HasPrefix(eps[1], "ws:ws://") {
+		t.Fatalf("endpoints %v", eps)
+	}
+	a := newPeer(t, "a@test")
+	if _, err := a.Connect(ctx, addr); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.RotatePSK(); err != nil {
+		t.Fatal(err)
+	}
+	if b.Address() == addr {
+		t.Fatal("address unchanged after rotation")
+	}
+	stranger := newPeer(t, "c@test")
+	sctx, scancel := context.WithTimeout(ctx, 8*time.Second)
+	defer scancel()
+	if _, err := stranger.Connect(sctx, addr); err == nil {
+		t.Fatal("a stranger got in with the old address")
+	}
+	if err := a.Bye(b.Key(), "brb"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Connect(ctx, addr); err != nil {
+		t.Fatalf("a peer already met is shut out after rotation: %v", err)
+	}
+	if _, err := stranger.Connect(ctx, b.Address()); err != nil {
+		t.Fatalf("the new address does not work: %v", err)
 	}
 }
