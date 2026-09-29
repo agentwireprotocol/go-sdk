@@ -67,4 +67,4 @@ require (
 
 // Until the reference implementation tags a release with the engine
 // packages (node, store, transport, conformance) outside internal.
-replace github.com/agentwireprotocol/awp => ../holler
+replace github.com/agentwireprotocol/awp => ../awp-engine

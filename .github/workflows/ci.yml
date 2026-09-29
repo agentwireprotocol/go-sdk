@@ -20,12 +20,14 @@ jobs:
         with:
           repository: agentwireprotocol/awp
           ref: engine
-          path: ../holler
+          path: awp-engine
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+      - name: Point the module at the engine checkout
+        run: go mod edit -replace github.com/agentwireprotocol/awp=./awp-engine
       - name: gofmt
-        run: test -z "$(gofmt -l .)"
+        run: test -z "$(gofmt -l awp examples)"
       - name: go vet
         run: go vet ./...
       - name: Tests, including the conformance suite
